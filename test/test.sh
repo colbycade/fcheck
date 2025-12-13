@@ -99,14 +99,14 @@ for test_name in $(echo "${!test_rules[@]}" | tr ' ' '\n' | sort); do
         echo -e "PASS: $test_name"
     else
         echo -e "FAIL: $test_name"
+        
+        # Only print details if it's a BAD image failure (as requested)
         if [ "$rule_id" != "GOOD" ]; then
-            echo "   Rule:      #$display_rule"
-            echo "   Expected:  '$expected'"
-        else
-             echo "   Expected:  [No Output]"
+            echo "   Rule:     #$display_rule"
+            echo "   Expected: '$expected'"
+            echo "   Actual:   '$output'"
         fi
-        echo "   Got Code:  $exit_code"
-        echo "   Got Out:   '$output'"
+        # Good images failing print nothing extra, just "FAIL: test_name"
     fi
 done
 
