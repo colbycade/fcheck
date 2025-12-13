@@ -1,11 +1,21 @@
 #!/bin/bash
 
+# Get the directory where this script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
+
+# Define paths relative to the script
+SRC_FILE="$SCRIPT_DIR/../submit/fcheck.c"
+EXEC_FILE="$SCRIPT_DIR/fcheck"
+
 # Compile the program
-gcc submit/fcheck.c -o fcheck -Wall -Werror -O -std=gnu11
+echo "Compiling..."
+gcc "$SRC_FILE" -o "$EXEC_FILE" -Wall -Werror -O -std=gnu11
 if [ $? -ne 0 ]; then
-    echo "Compilation failed"
+    echo "Compilation failed. Checked path: $SRC_FILE"
     exit 1
 fi
+echo "Compilation successful. Running tests..."
+echo "--------------------------------"
 
 # 1. Map Rules to Expected Error Messages
 declare -A rule_messages
@@ -29,50 +39,25 @@ rule_messages=(
 # 2. Map Test Cases to Rule IDs
 declare -A test_rules
 test_rules=(
-    # Rule 1
     ["badinode"]="1"
-    
-    # Rule 2 (Split into Direct vs Indirect messages)
     ["badaddr"]="2a"
     ["badindir1"]="2b"
     ["badindir2"]="2b"
-    
-    # Rule 3
     ["badroot"]="3"
     ["badroot2"]="3"
-    
-    # Rule 4
     ["badfmt"]="4"
-    ["mismatch"]="4" # Usually fails format check first
-    
-    # Rule 5
+    ["mismatch"]="4"
     ["indirfree"]="5"
     ["mrkfree"]="5"
-    
-    # Rule 6
     ["mrkused"]="6"
-    
-    # Rule 7
     ["addronce"]="7"
-    
-    # Rule 8
     ["addronce2"]="8"
-    
-    # Rule 9
     ["imrkused"]="9"
-    
-    # Rule 10
     ["imrkfree"]="10"
-    
-    # Rule 11
     ["badrefcnt"]="11"
     ["badrefcnt2"]="11"
-    
-    # Rule 12
     ["badlarge"]="12"
     ["dironce"]="12"
-    
-    # Good Cases
     ["good"]="GOOD"
     ["goodlarge"]="GOOD"
     ["goodlink"]="GOOD"
@@ -81,12 +66,10 @@ test_rules=(
 )
 
 # 3. Run Tests
-for test_name in "${!test_rules[@]}"; do
-    test_file="testcases/$test_name"
+for test_name in $(echo "${!test_rules[@]}" | tr ' ' '\n' | sort); do
+    test_file="$SCRIPT_DIR/$test_name"
     rule_id="${test_rules[$test_name]}"
     expected="${rule_messages[$rule_id]}"
-    
-    # Handle display name for split rules (e.g., display "2" instead of "2a")
     display_rule=${rule_id//[a-z]/} 
 
     if [ ! -f "$test_file" ]; then
@@ -94,42 +77,40 @@ for test_name in "${!test_rules[@]}"; do
         continue
     fi
 
-    # Run fcheck
-    output=$(./fcheck "$test_file" 2>&1)
+    # Run fcheck using the absolute path
+    output=$("$EXEC_FILE" "$test_file" 2>&1)
     exit_code=$?
+    test_passed=false
 
-    # Logic for GOOD cases (Expect 0 exit, empty output)
+    # Logic for GOOD cases
     if [ "$rule_id" == "GOOD" ]; then
         if [ $exit_code -eq 0 ] && [ -z "$output" ]; then
-            echo -e "PASS: $test_name"
-        else
-            echo -e "FAIL: $test_name"
-            echo "   Exit Code: $exit_code (Should be 0)"
-            echo "   Output:    '$output'"
-            echo "   Expected:  [No Output]"
+            test_passed=true
         fi
-        continue
+    # Logic for ERROR cases
+    else
+        if [ $exit_code -eq 1 ] && [ "$output" == "$expected" ]; then
+            test_passed=true
+        fi
     fi
 
-    # Logic for ERROR cases (Expect 1 exit, specific message)
-    if [ $exit_code -eq 1 ]; then
-        if [ "$output" == "$expected" ]; then
-             echo -e "PASS: $test_name"
-        else
-             echo -e "FAIL: $test_name"
-             echo "   Rule:      #$display_rule"
-             echo "   Exit Code: $exit_code"
-             echo "   Output:    '$output'"
-             echo "   Expected:  '$expected'"
-        fi
+    # Output Result
+    if [ "$test_passed" = true ]; then
+        echo -e "PASS: $test_name"
     else
         echo -e "FAIL: $test_name"
-        echo "   Rule:      #$display_rule"
-        echo "   Exit Code: $exit_code (Should be 1)"
-        echo "   Output:    '$output'"
-        echo "   Expected:  '$expected'"
+        if [ "$rule_id" != "GOOD" ]; then
+            echo "   Rule:      #$display_rule"
+            echo "   Expected:  '$expected'"
+        else
+             echo "   Expected:  [No Output]"
+        fi
+        echo "   Got Code:  $exit_code"
+        echo "   Got Out:   '$output'"
     fi
 done
 
+# Cleanup
+rm "$EXEC_FILE"
 echo "--------------------------------"
 echo "Testing complete."
