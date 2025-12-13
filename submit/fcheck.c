@@ -11,14 +11,15 @@
 #define BLOCK_SIZE (BSIZE)
 
 int main(int argc, char *argv[]) {
-    // --- SETUP ---
-    int fsfd,i,j;
+    // --- SETUP AND METADATA ---
+    int fsfd;
     char *addr;
     struct stat st;
     struct superblock *sb;
     struct dinode *itable;
     struct dinode *dip;
-    struct dirent *de;
+    uint i,j,min_db,max_db,blk;
+    uint *indir;
 
     // Usage check
     if (argc != 2) {
@@ -52,11 +53,16 @@ int main(int argc, char *argv[]) {
     // Get start of inode table (block 2)
     itable = (struct dinode *) (addr + IBLOCK((uint)0) * BLOCK_SIZE); 
 
+    // Compute min and max data block numbers to define valid range
+    // nblocks (data blocks) + usedblocks (metadata blocks) = size (total blocks)
+    min_db = sb->size - sb->nblocks;
+    max_db = sb->size - 1;
+
     // --- VERIFY CONSISTENCY RULES ---
 
     // Read inodes
     for (i = 0; i < sb->ninodes; i++) {
-        dip = &itable[i];
+        dip = &itable[i]; // current inode
 
         // RULE 1: Each inode is either unallocated or valid type
         if (dip->type != 0 && dip->type != T_DIR && dip->type != T_FILE && dip->type != T_DEV) {
@@ -65,6 +71,35 @@ int main(int argc, char *argv[]) {
         }
 
         // RULE 2: In-use inodes have valid direct and indirect block addresses
+        // a. Check direct addresses
+        for (j = 0; j < NDIRECT; j++) {
+            blk = dip->addrs[j];
+            // block address should be 0 (not used) or within valid range
+            if (blk != 0 && (blk < min_db || blk > max_db)) {
+                fprintf(stderr, "ERROR: bad direct address in inode.\n");
+                exit(1);
+            }
+        }
+        // b. Check indirect addresses
+        blk = dip->addrs[NDIRECT];
+        if (blk != 0) {  // skip if not used
+            // indirect block address should be within valid range
+            if (blk < min_db || blk > max_db) {
+                fprintf(stderr, "ERROR: bad indirect address in inode.\n");
+                exit(1);
+            }
+
+            // read indirect block (array of direct addresses)
+            indir = (uint *) (addr + blk * BLOCK_SIZE);
+            for (j = 0; j < NINDIRECT; j++) {
+                blk = indir[j];
+                if (blk != 0 && (blk < min_db || blk > max_db)) {
+                    fprintf(stderr, "ERROR: bad indirect address in inode.\n");
+                    exit(1);
+                }
+            }
+        }
+
     }
 
 
