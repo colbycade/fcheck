@@ -46,7 +46,7 @@ int main(int argc, char *argv[]) {
     }
 
     // Read the superblock (block 1)
-    sb = (struct superblock *) (addr + 1 + BLOCK_SIZE);
+    sb = (struct superblock *) (addr + 1 * BLOCK_SIZE);
 
     // Read the inodes (inode table starts at block 2)
     dip = (struct dinode *) (addr + IBLOCK((uint)0) * BLOCK_SIZE); 
