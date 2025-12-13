@@ -23,7 +23,7 @@ int get_bitmap_bit(char *addr, struct superblock *sb, uint blk) {
 }
 
 int main(int argc, char *argv[]) {
-    // --- SETUP AND METADATA ---
+    // --- SETUP AND READ METADATA ---
     int fsfd;
     char *addr;
     struct stat st;
@@ -170,6 +170,16 @@ int main(int argc, char *argv[]) {
 
     }
 
+    // Compare used blocks against bitmap
+    for (blk = min_db; blk <= max_db; blk++) {
+        int bit = get_bitmap_bit(addr, sb, blk);
+
+        // RULE 6: Block marked in use in bitmap is actually used
+        if (bit == 1 && used[blk] == 0) {
+            fprintf(stderr, "ERROR: bitmap marks block in use but it is not in use.\n");
+            exit(1);
+        }
+    }
 
     // --- CLEANUP ---
     munmap(addr, st.st_size);
