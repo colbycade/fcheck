@@ -10,6 +10,18 @@
 
 #define BLOCK_SIZE (BSIZE)
 
+// Helper function to get the bit value for a given block from the bitmap
+int get_bitmap_bit(char *addr, struct superblock *sb, uint blk) {
+    // Find which bitmap block contains the bit
+    uint bblk = BBLOCK(blk, sb->ninodes);
+    uchar *bptr = (uchar *) addr + bblk * BLOCK_SIZE;
+    // Extract the specific bit
+    uint bit_index = blk % (BLOCK_SIZE * 8);
+    uint byte_index = bit_index / 8;
+    uint bit_position = bit_index % 8;
+    return (bptr[byte_index] >> bit_position) & 0x1;
+}
+
 int main(int argc, char *argv[]) {
     // --- SETUP AND METADATA ---
     int fsfd;
@@ -54,14 +66,14 @@ int main(int argc, char *argv[]) {
     // Get start of inode table (block 2)
     itable = (struct dinode *) (addr + IBLOCK((uint)0) * BLOCK_SIZE); 
 
-    // Compute min and max data block numbers to define valid range
+    // Compute valid data block range
     // nblocks (data blocks) + usedblocks (metadata blocks) = size (total blocks)
     min_db = sb->size - sb->nblocks;
     max_db = sb->size - 1;
 
     // --- VERIFY CONSISTENCY RULES ---
 
-    // Track blocks used by inodes
+    // Track blocks used by inodes in an array (0 = free, 1 = used)
     used = (int *) calloc(sb->size, sizeof(int));
     if (used == NULL) {
         perror("calloc failed\n");
@@ -91,6 +103,12 @@ int main(int argc, char *argv[]) {
                     exit(1);
                 }
 
+                // RULE 5a: Direct address is marked in use in bitmap
+                if (get_bitmap_bit(addr, sb, blk) == 0) {
+                    fprintf(stderr, "ERROR: address used by inode but marked free in bitmap.\n");
+                    exit(1);
+                }
+
                 // RULE 7: Direct address doesn't point to a block already in use
                 if (used[blk]) {
                     fprintf(stderr, "ERROR: direct address used more than once.\n");
@@ -106,6 +124,12 @@ int main(int argc, char *argv[]) {
             // RULE 2b: If in use, indirect block address is within valid range
             if (blk < min_db || blk > max_db) {
                 fprintf(stderr, "ERROR: bad indirect address in inode.\n");
+                exit(1);
+            }
+
+            // RULE 5b: Indirect address is marked in use in bitmap
+            if (get_bitmap_bit(addr, sb, blk) == 0) {
+                fprintf(stderr, "ERROR: address used by inode but marked free in bitmap.\n");
                 exit(1);
             }
 
@@ -125,6 +149,12 @@ int main(int argc, char *argv[]) {
                     // RULE 2c: If in use, direct address in indirect block is within valid range
                     if (blk < min_db || blk > max_db) {
                         fprintf(stderr, "ERROR: bad indirect address in inode.\n");
+                        exit(1);
+                    }
+
+                    // RULE 5c: Direct address in indirect block is marked in use in bitmap
+                    if (get_bitmap_bit(addr, sb, blk) == 0) {
+                        fprintf(stderr, "ERROR: address used by inode but marked free in bitmap.\n");
                         exit(1);
                     }
 
