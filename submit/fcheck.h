@@ -1,11 +1,16 @@
 // This header file contains the xv6 definitions we need for fcheck.c
 
-// --- xv6 type definitions (copied from types.h) ---
+// --- type definitions (copied from types.h) ---
 typedef unsigned int   uint;
 typedef unsigned short ushort;
 typedef unsigned char  uchar;
 
-// --- xv6 file system definitions (copied from fs.h) ---
+// --- file types (copied from stat.h) ---
+#define T_DIR  1   // Directory
+#define T_FILE 2   // File
+#define T_DEV  3   // Special device
+
+// --- file system definitions (copied from fs.h) ---
 
 // Block 0 is unused.
 // Block 1 is super block.

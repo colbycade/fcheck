@@ -12,10 +12,11 @@
 
 int main(int argc, char *argv[]) {
     // --- SETUP ---
-    int fsfd;
+    int fsfd,i,j;
     char *addr;
     struct stat st;
     struct superblock *sb;
+    struct dinode *itable;
     struct dinode *dip;
     struct dirent *de;
 
@@ -48,10 +49,23 @@ int main(int argc, char *argv[]) {
     // Read the superblock (block 1)
     sb = (struct superblock *) (addr + 1 * BLOCK_SIZE);
 
-    // Read the inodes (inode table starts at block 2)
-    dip = (struct dinode *) (addr + IBLOCK((uint)0) * BLOCK_SIZE); 
+    // Get start of inode table (block 2)
+    itable = (struct dinode *) (addr + IBLOCK((uint)0) * BLOCK_SIZE); 
 
     // --- VERIFY CONSISTENCY RULES ---
+
+    // Read inodes
+    for (i = 0; i < sb->ninodes; i++) {
+        dip = &itable[i];
+
+        // RULE 1: Each inode is either unallocated or valid type
+        if (dip->type != 0 && dip->type != T_DIR && dip->type != T_FILE && dip->type != T_DEV) {
+            fprintf(stderr, "ERROR: bad inode.\n");
+            exit(1);
+        }
+
+        // RULE 2: In-use inodes have valid direct and indirect block addresses
+    }
 
 
     // --- CLEANUP ---
