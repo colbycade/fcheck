@@ -19,6 +19,7 @@ int main(int argc, char *argv[]) {
     struct dinode *itable;
     struct dinode *dip;
     uint i,j,min_db,max_db,blk;
+    int *used;
     uint *indir;
 
     // Usage check
@@ -60,6 +61,13 @@ int main(int argc, char *argv[]) {
 
     // --- VERIFY CONSISTENCY RULES ---
 
+    // Track blocks used by inodes
+    used = (int *) calloc(sb->size, sizeof(int));
+    if (used == NULL) {
+        perror("calloc failed\n");
+        exit(1);
+    }
+
     // Read inodes
     for (i = 0; i < sb->ninodes; i++) {
         dip = &itable[i]; // current inode
@@ -70,32 +78,62 @@ int main(int argc, char *argv[]) {
             exit(1);
         }
 
-        // RULE 2: In-use inodes have valid direct and indirect block addresses
-        // a. Check direct addresses
+        // skip unallocated inodes
+        if (dip->type == 0) continue; 
+
+        // read direct addresses
         for (j = 0; j < NDIRECT; j++) {
             blk = dip->addrs[j];
-            // block address should be 0 (not used) or within valid range
-            if (blk != 0 && (blk < min_db || blk > max_db)) {
-                fprintf(stderr, "ERROR: bad direct address in inode.\n");
-                exit(1);
+            if (blk != 0) {
+                // RULE 2a: If in use, direct block address is within valid range
+                if (blk < min_db || blk > max_db) {
+                    fprintf(stderr, "ERROR: bad direct address in inode.\n");
+                    exit(1);
+                }
+
+                // RULE 7: Direct address doesn't point to a block already in use
+                if (used[blk]) {
+                    fprintf(stderr, "ERROR: direct address used more than once.\n");
+                    exit(1);
+                }
+                used[blk] = 1; // else mark block as used for future checks
             }
         }
-        // b. Check indirect addresses
+
+        // read indirect addresses
         blk = dip->addrs[NDIRECT];
         if (blk != 0) {  // skip if not used
-            // indirect block address should be within valid range
+            // RULE 2b: If in use, indirect block address is within valid range
             if (blk < min_db || blk > max_db) {
                 fprintf(stderr, "ERROR: bad indirect address in inode.\n");
                 exit(1);
             }
 
+            // RULE 8a: Indirect block doesn't point to a block already in use
+            if (used[blk]) {
+                fprintf(stderr, "ERROR: indirect address used more than once.\n");
+                exit(1);
+            }
+            used[blk] = 1; // mark indirect block as used
+
             // read indirect block (array of direct addresses)
             indir = (uint *) (addr + blk * BLOCK_SIZE);
             for (j = 0; j < NINDIRECT; j++) {
                 blk = indir[j];
-                if (blk != 0 && (blk < min_db || blk > max_db)) {
-                    fprintf(stderr, "ERROR: bad indirect address in inode.\n");
-                    exit(1);
+
+                if (blk != 0) {
+                    // RULE 2c: If in use, direct address in indirect block is within valid range
+                    if (blk < min_db || blk > max_db) {
+                        fprintf(stderr, "ERROR: bad indirect address in inode.\n");
+                        exit(1);
+                    }
+
+                    // RULE 8b: Direct address in indirect block doesn't point to a block already in use
+                    if (used[blk]) {
+                        fprintf(stderr, "ERROR: indirect address used more than once.\n");
+                        exit(1);
+                    }
+                    used[blk] = 1;
                 }
             }
         }
