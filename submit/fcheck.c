@@ -5,7 +5,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/mman.h> // for mmap
-#include <string.h>   // for strcmp
+#include <string.h>
 
 #include "fcheck.h" // includes xv6 definitions
 
@@ -33,10 +33,10 @@ int main(int argc, char *argv[])
     struct superblock *sb;
     struct dinode *itable;
     struct dinode *dip;
-    uint i, j, k, min_db, max_db, blk, ref_inum;
+    struct dirent *de;
+    uint i, j, min_db, max_db, blk, k, ref_inum;
     int *used;
     uint *indir;
-    struct dirent *de;
 
     // Usage check
     if (argc != 2)
@@ -84,16 +84,6 @@ int main(int argc, char *argv[])
     // Track blocks used by inodes in an array (0 = free, 1 = used)
     used = (int *)calloc(sb->size, sizeof(int));
     if (used == NULL)
-    {
-        perror("calloc failed\n");
-        exit(1);
-    }
-
-    // Track inode references for rules 9, 10, 11, 12
-    int *inode_referenced = (int *)calloc(sb->ninodes, sizeof(int));
-    int *inode_refcount = (int *)calloc(sb->ninodes, sizeof(int));
-    int *dir_refcount = (int *)calloc(sb->ninodes, sizeof(int));
-    if (inode_referenced == NULL || inode_refcount == NULL || dir_refcount == NULL)
     {
         perror("calloc failed\n");
         exit(1);
@@ -238,7 +228,7 @@ int main(int argc, char *argv[])
         if (strcmp(de[i].name, "..") == 0)
         {
             found_dotdot = 1;
-            if (de[i].inum != ROOTINO) // RULE 3a: root's .. must point to itself
+            if (de[i].inum != ROOTINO)
             {
                 fprintf(stderr, "ERROR: root directory does not exist.\n");
                 exit(1);
@@ -252,158 +242,67 @@ int main(int argc, char *argv[])
         exit(1);
     }
 
-    // RULE 4: Each directory contains . and .. entries, and the . entry points to the directory itself
+    // Track inode references for rules 9, 10, 11, 12
+    int *inode_referenced = calloc(sb->ninodes, sizeof(int));
+    int *inode_refcount = calloc(sb->ninodes, sizeof(int));
+    int *dir_refcount = calloc(sb->ninodes, sizeof(int));
+    int *parent = calloc(sb->ninodes, sizeof(int));
+    int *dotdot_of = calloc(sb->ninodes, sizeof(int));
+    if (inode_referenced == NULL || inode_refcount == NULL || dir_refcount == NULL || parent == NULL || dotdot_of == NULL)
+    {
+        perror("calloc failed\n");
+        exit(1);
+    }
     for (i = 0; i < sb->ninodes; i++)
     {
-        dip = &itable[i]; // current inode
+        parent[i] = -1;
+        dotdot_of[i] = -1;
+    }
+
+    // RULE 4: Each directory contains . and .. entries, and the . entry points to itself
+    for (i = 0; i < sb->ninodes; i++)
+    {
+        dip = &itable[i];
         if (dip->type != T_DIR)
             continue;
-        int found_dot = 0;
-        int found_dotdot = 0;
-        uint bytes_read = 0;
-        for (j = 0; j < NDIRECT; j++)
-        {
-            blk = dip->addrs[j];
-            if (blk == 0)
-                continue;
-            if (bytes_read >= dip->size)
-                break;
-            de = (struct dirent *)(addr + blk * BLOCK_SIZE);
-            uint entries_per_block = BLOCK_SIZE / sizeof(struct dirent);
-            for (k = 0; k < entries_per_block && bytes_read < dip->size; k++) // read directory entries
-            {
-                if (de[k].inum == 0)
-                    break;
-                if (strcmp(de[k].name, ".") == 0) // RULE 4a: . entry points to directory itself
-                {
-                    found_dot = 1;
-                    if (de[k].inum == 0 || de[k].inum >= sb->ninodes || de[k].inum != i)
-                    {
-                        fprintf(stderr, "ERROR: directory not properly formatted.\n");
-                        exit(1);
-                    }
-                }
-                if (strcmp(de[k].name, "..") == 0) // RULE 4b: .. entry points to valid directory
-                {
-                    found_dotdot = 1;
-                    uint parent_inum = de[k].inum;
-                    if (parent_inum == 0 || parent_inum >= sb->ninodes || itable[parent_inum].type != T_DIR)
-                    {
-                        fprintf(stderr, "ERROR: directory not properly formatted.\n");
-                        exit(1);
-                    }
-                    if (i != ROOTINO) // verify parent contains this directory
-                    {
-                        int found_in_parent = 0;
-                        struct dinode *parent_dip = &itable[parent_inum];
-                        uint p_bytes_read = 0;
-                        for (uint pj = 0; pj < NDIRECT && !found_in_parent; pj++)
-                        {
-                            uint pblk = parent_dip->addrs[pj];
-                            if (pblk == 0)
-                                continue;
-                            if (p_bytes_read >= parent_dip->size)
-                                break;
-                            struct dirent *pde = (struct dirent *)(addr + pblk * BLOCK_SIZE);
-                            uint p_entries_per_block = BLOCK_SIZE / sizeof(struct dirent);
-                            for (uint pk = 0; pk < p_entries_per_block && p_bytes_read < parent_dip->size && !found_in_parent; pk++)
-                            {
-                                if (pde[pk].inum == 0)
-                                {
-                                    p_bytes_read += sizeof(struct dirent);
-                                    continue;
-                                }
-                                if (pde[pk].inum == i)
-                                {
-                                    found_in_parent = 1;
-                                    break;
-                                }
-                                p_bytes_read += sizeof(struct dirent);
-                            }
-                        }
-                        if (!found_in_parent && parent_dip->addrs[NDIRECT] != 0)
-                        {
-                            uint pblk = parent_dip->addrs[NDIRECT];
-                            uint *pindir = (uint *)(addr + pblk * BLOCK_SIZE);
-                            for (uint pj = 0; pj < NINDIRECT && !found_in_parent; pj++)
-                            {
-                                pblk = pindir[pj];
-                                if (pblk == 0)
-                                    continue;
-                                if (p_bytes_read >= parent_dip->size)
-                                    break;
-                                struct dirent *pde = (struct dirent *)(addr + pblk * BLOCK_SIZE);
-                                uint p_entries_per_block = BLOCK_SIZE / sizeof(struct dirent);
-                                for (uint pk = 0; pk < p_entries_per_block && p_bytes_read < parent_dip->size && !found_in_parent; pk++)
-                                {
-                                    if (pde[pk].inum == 0)
-                                    {
-                                        p_bytes_read += sizeof(struct dirent);
-                                        continue;
-                                    }
-                                    if (pde[pk].inum == i)
-                                    {
-                                        found_in_parent = 1;
-                                        break;
-                                    }
-                                    p_bytes_read += sizeof(struct dirent);
-                                }
-                            }
-                        }
-                        if (!found_in_parent)
-                        {
-                            fprintf(stderr, "ERROR: directory not properly formatted.\n");
-                            exit(1);
-                        }
-                    }
-                }
-                bytes_read += sizeof(struct dirent);
-            }
-        }
-        blk = dip->addrs[NDIRECT];
-        if (blk != 0)
-        {
-            indir = (uint *)(addr + blk * BLOCK_SIZE);
-            for (j = 0; j < NINDIRECT; j++) // read indirect directory blocks
-            {
-                blk = indir[j];
-                if (blk == 0)
-                    continue;
-                if (bytes_read >= dip->size)
-                    break;
-                de = (struct dirent *)(addr + blk * BLOCK_SIZE);
-                uint entries_per_block = BLOCK_SIZE / sizeof(struct dirent);
-                for (k = 0; k < entries_per_block && bytes_read < dip->size; k++)
-                {
-                    if (de[k].inum == 0)
-                        break;
-                    if (strcmp(de[k].name, ".") == 0) // RULE 4a: . entry points to directory itself
-                    {
-                        found_dot = 1;
-                        if (de[k].inum == 0 || de[k].inum >= sb->ninodes || de[k].inum != i)
-                        {
-                            fprintf(stderr, "ERROR: directory not properly formatted.\n");
-                            exit(1);
-                        }
-                    }
-                    if (strcmp(de[k].name, "..") == 0) // RULE 4b: .. entry points to valid directory
-                    {
-                        found_dotdot = 1;
-                        if (de[k].inum == 0 || de[k].inum >= sb->ninodes || itable[de[k].inum].type != T_DIR)
-                        {
-                            fprintf(stderr, "ERROR: directory not properly formatted.\n");
-                            exit(1);
-                        }
-                    }
-                    bytes_read += sizeof(struct dirent);
-                }
-            }
-        }
-        if (!found_dot || !found_dotdot)
+
+        if (dip->addrs[0] == 0)
         {
             fprintf(stderr, "ERROR: directory not properly formatted.\n");
             exit(1);
         }
+
+        int dot = 0;
+        int dotdot = 0;
+        int dotdot_inum = -1;
+        de = (struct dirent *)(addr + dip->addrs[0] * BLOCK_SIZE);
+        for (j = 0; j < BLOCK_SIZE / sizeof(struct dirent); j++)
+        {
+            if (de[j].inum == 0)
+                continue;
+
+            if (strcmp(de[j].name, ".") == 0)
+            {
+                if (de[j].inum != i)
+                {
+                    fprintf(stderr, "ERROR: directory not properly formatted.\n");
+                    exit(1);
+                }
+                dot = 1;
+            }
+            else if (strcmp(de[j].name, "..") == 0)
+            {
+                dotdot = 1;
+                dotdot_inum = de[j].inum;
+            }
+        }
+
+        if (!dot || !dotdot)
+        {
+            fprintf(stderr, "ERROR: directory not properly formatted.\n");
+            exit(1);
+        }
+        dotdot_of[i] = dotdot_inum;
     }
 
     // RULE 9, 10, 11, 12: Track inode references by traversing all directories
@@ -412,64 +311,100 @@ int main(int argc, char *argv[])
         dip = &itable[i];
         if (dip->type != T_DIR)
             continue;
-        uint bytes_read = 0;
         for (j = 0; j < NDIRECT; j++)
         {
             blk = dip->addrs[j];
             if (blk == 0)
                 continue;
-            if (bytes_read >= dip->size)
-                break;
             de = (struct dirent *)(addr + blk * BLOCK_SIZE);
-            uint entries_per_block = BLOCK_SIZE / sizeof(struct dirent);
-            for (k = 0; k < entries_per_block && bytes_read < dip->size; k++)
+            for (k = 0; k < BLOCK_SIZE / sizeof(struct dirent); k++, de++)
             {
-                if (de[k].inum == 0)
-                {
-                    bytes_read += sizeof(struct dirent);
+                if (de->inum == 0)
                     continue;
-                }
-                ref_inum = de[k].inum;
+                ref_inum = de->inum;
                 if (ref_inum >= sb->ninodes)
-                {
-                    bytes_read += sizeof(struct dirent);
                     continue;
+                if (strcmp(de->name, ".") != 0 && strcmp(de->name, "..") != 0 && itable[ref_inum].type == T_DIR)
+                {
+                    if (parent[ref_inum] == -1)
+                        parent[ref_inum] = i;
+                    else if (parent[ref_inum] != (int)i)
+                    {
+                        fprintf(stderr, "ERROR: directory appears more than once in file system.\n");
+                        exit(1);
+                    }
                 }
                 inode_referenced[ref_inum] = 1;
-                if (strcmp(de[k].name, ".") != 0)
-                    inode_refcount[ref_inum]++; // count links excluding self-reference
-                if (strcmp(de[k].name, ".") != 0 && strcmp(de[k].name, "..") != 0)
-                    dir_refcount[ref_inum]++; // count directory links excluding . and ..
-                bytes_read += sizeof(struct dirent);
+                if (strcmp(de->name, ".") != 0)
+                    inode_refcount[ref_inum]++;
+                if (strcmp(de->name, ".") != 0 && strcmp(de->name, "..") != 0)
+                    dir_refcount[ref_inum]++;
             }
         }
         blk = dip->addrs[NDIRECT];
         if (blk != 0)
         {
             indir = (uint *)(addr + blk * BLOCK_SIZE);
-            for (j = 0; j < NINDIRECT; j++) // read indirect directory blocks
+            for (j = 0; j < NINDIRECT; j++)
             {
                 blk = indir[j];
                 if (blk == 0)
                     continue;
-                if (bytes_read >= dip->size)
-                    break;
                 de = (struct dirent *)(addr + blk * BLOCK_SIZE);
-                uint entries_per_block = BLOCK_SIZE / sizeof(struct dirent);
-                for (k = 0; k < entries_per_block && bytes_read < dip->size; k++)
+                for (k = 0; k < BLOCK_SIZE / sizeof(struct dirent); k++, de++)
                 {
-                    if (de[k].inum == 0)
-                        break;
-                    ref_inum = de[k].inum;
+                    if (de->inum == 0)
+                        continue;
+                    ref_inum = de->inum;
                     if (ref_inum >= sb->ninodes)
                         continue;
+                    if (strcmp(de->name, ".") != 0 && strcmp(de->name, "..") != 0 && itable[ref_inum].type == T_DIR)
+                    {
+                        if (parent[ref_inum] == -1)
+                            parent[ref_inum] = i;
+                        else if (parent[ref_inum] != (int)i)
+                        {
+                            fprintf(stderr, "ERROR: directory appears more than once in file system.\n");
+                            exit(1);
+                        }
+                    }
                     inode_referenced[ref_inum] = 1;
-                    if (strcmp(de[k].name, ".") != 0)
-                        inode_refcount[ref_inum]++; // count links excluding self-reference
-                    if (strcmp(de[k].name, ".") != 0 && strcmp(de[k].name, "..") != 0)
-                        dir_refcount[ref_inum]++; // count directory links excluding . and ..
-                    bytes_read += sizeof(struct dirent);
+                    if (strcmp(de->name, ".") != 0)
+                        inode_refcount[ref_inum]++;
+                    if (strcmp(de->name, ".") != 0 && strcmp(de->name, "..") != 0)
+                        dir_refcount[ref_inum]++;
                 }
+            }
+        }
+    }
+
+    // Validate .. entries using parent map
+    for (i = 0; i < sb->ninodes; i++)
+    {
+        dip = &itable[i];
+        if (dip->type != T_DIR)
+            continue;
+
+        if (dotdot_of[i] == -1)
+        {
+            fprintf(stderr, "ERROR: directory not properly formatted.\n");
+            exit(1);
+        }
+
+        if (i == ROOTINO)
+        {
+            if (dotdot_of[i] != ROOTINO)
+            {
+                fprintf(stderr, "ERROR: directory not properly formatted.\n");
+                exit(1);
+            }
+        }
+        else
+        {
+            if (inode_referenced[i] && parent[i] != dotdot_of[i])
+            {
+                fprintf(stderr, "ERROR: directory not properly formatted.\n");
+                exit(1);
             }
         }
     }
@@ -524,6 +459,8 @@ int main(int argc, char *argv[])
     free(inode_referenced);
     free(inode_refcount);
     free(dir_refcount);
+    free(dotdot_of);
+    free(parent);
     munmap(addr, st.st_size);
     close(fsfd);
     return 0; // success
