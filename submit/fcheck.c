@@ -33,7 +33,8 @@ int main(int argc, char *argv[])
     struct superblock *sb;
     struct dinode *itable;
     struct dinode *dip;
-    uint i, j, min_db, max_db, blk;
+    struct dirent *de;
+    uint i, j, min_db, max_db, blk, k, ref_inum;
     int *used;
     uint *indir;
 
@@ -207,8 +208,308 @@ int main(int argc, char *argv[])
         }
     }
 
+    // RULE 3: Root directory exists, its inode number is 1, and the parent of the root directory is itself
+    // Check root inode is allocated and is a directory
+    if (sb->ninodes < 2 || itable[ROOTINO].type != T_DIR)
+    {
+        fprintf(stderr, "ERROR: root directory does not exist.\n");
+        exit(1);
+    }
+    // Root directory must have at least one data block
+    if (itable[ROOTINO].addrs[0] == 0)
+    {
+        fprintf(stderr, "ERROR: root directory does not exist.\n");
+        exit(1);
+    }
+    // Scan root directory entries to make sure ".." exists and points to itself
+    de = (struct dirent *)(addr + itable[ROOTINO].addrs[0] * BLOCK_SIZE);
+    int found_dotdot = 0;
+    for (i = 0; i < itable[ROOTINO].size / sizeof(struct dirent); i++)
+    {
+        if (de[i].inum == 0)
+            break;
+        if (strcmp(de[i].name, "..") == 0)
+        {
+            found_dotdot = 1;
+            if (de[i].inum != ROOTINO)
+            {
+                fprintf(stderr, "ERROR: root directory does not exist.\n");
+                exit(1);
+            }
+            break;
+        }
+    }
+    if (!found_dotdot)
+    {
+        fprintf(stderr, "ERROR: root directory does not exist.\n");
+        exit(1);
+    }
+
+    // Track inode references for rules 9, 10, 11, 12
+    // inode_referenced: inode appears in some directory entry
+    int *inode_referenced = calloc(sb->ninodes, sizeof(int));
+    // inode_refcount: number of directory entries pointing to inode (excluding ".")
+    int *inode_refcount = calloc(sb->ninodes, sizeof(int));
+    // dir_refcount: number of parent directory links to a directory inode (excluding "." and "..")
+    int *dir_refcount = calloc(sb->ninodes, sizeof(int));
+    // parent: record parent directory inode number for each directory inode
+    int *parent = calloc(sb->ninodes, sizeof(int));
+    // dotdot_of: record ".." inode number for each directory inode
+    int *dotdot_of = calloc(sb->ninodes, sizeof(int));
+    if (inode_referenced == NULL || inode_refcount == NULL || dir_refcount == NULL || parent == NULL || dotdot_of == NULL)
+    {
+        perror("calloc failed\n");
+        exit(1);
+    }
+    // Initialize parent and dotdot_of arrays to "unknown"
+    for (i = 0; i < sb->ninodes; i++)
+    {
+        parent[i] = -1;
+        dotdot_of[i] = -1;
+    }
+
+    // RULE 4: Each directory contains . and .. entries, and the . entry points to itself
+    // First pass: for each directory inode, verify "." and ".." exist and record ".." target
+    for (i = 0; i < sb->ninodes; i++)
+    {
+        dip = &itable[i];
+        if (dip->type != T_DIR)
+            continue;
+
+        // Directory must have at least one data block
+        if (dip->addrs[0] == 0)
+        {
+            fprintf(stderr, "ERROR: directory not properly formatted.\n");
+            exit(1);
+        }
+
+        // Track whether "." and ".." were found in the first directory block
+        int dot = 0;
+        int dotdot = 0;
+        int dotdot_inum = -1;
+
+        // Read directory entries from the first data block
+        de = (struct dirent *)(addr + dip->addrs[0] * BLOCK_SIZE);
+        for (j = 0; j < BLOCK_SIZE / sizeof(struct dirent); j++)
+        {
+            if (de[j].inum == 0)
+                continue;
+
+            // "." must point to itself
+            if (strcmp(de[j].name, ".") == 0)
+            {
+                if (de[j].inum != i)
+                {
+                    fprintf(stderr, "ERROR: directory not properly formatted.\n");
+                    exit(1);
+                }
+                dot = 1;
+            }
+            // Record ".." target so we can validate it after building parent relationships
+            else if (strcmp(de[j].name, "..") == 0)
+            {
+                dotdot = 1;
+                dotdot_inum = de[j].inum;
+            }
+        }
+
+        // Missing "." or ".." is a formatting error
+        if (!dot || !dotdot)
+        {
+            fprintf(stderr, "ERROR: directory not properly formatted.\n");
+            exit(1);
+        }
+
+        // Save ".." target for this directory inode
+        dotdot_of[i] = dotdot_inum;
+    }
+
+    // RULE 9, 10, 11, 12: Track inode references by traversing all directories
+    // Second pass: walk every directory entry and update inode reference bookkeeping
+    for (i = 0; i < sb->ninodes; i++)
+    {
+        dip = &itable[i];
+        if (dip->type != T_DIR)
+            continue;
+
+        // Traverse direct directory blocks
+        for (j = 0; j < NDIRECT; j++)
+        {
+            blk = dip->addrs[j];
+            if (blk == 0)
+                continue;
+
+            de = (struct dirent *)(addr + blk * BLOCK_SIZE);
+            for (k = 0; k < BLOCK_SIZE / sizeof(struct dirent); k++, de++)
+            {
+                if (de->inum == 0)
+                    continue;
+
+                ref_inum = de->inum;
+                if (ref_inum >= sb->ninodes)
+                    continue;
+
+                // Build parent map for directories based on directory entries (excluding "." and "..")
+                if (strcmp(de->name, ".") != 0 && strcmp(de->name, "..") != 0 && itable[ref_inum].type == T_DIR)
+                {
+                    if (parent[ref_inum] == -1)
+                        parent[ref_inum] = i;
+                    else if (parent[ref_inum] != (int)i)
+                    {
+                        fprintf(stderr, "ERROR: directory appears more than once in file system.\n");
+                        exit(1);
+                    }
+                }
+
+                // Mark that this inode is referenced by some directory
+                inode_referenced[ref_inum] = 1;
+
+                // Count references for link count checks (exclude "." entry)
+                if (strcmp(de->name, ".") != 0)
+                    inode_refcount[ref_inum]++;
+
+                // Count directory parents (exclude "." and "..")
+                if (strcmp(de->name, ".") != 0 && strcmp(de->name, "..") != 0)
+                    dir_refcount[ref_inum]++;
+            }
+        }
+
+        // Traverse indirect directory blocks (if present)
+        blk = dip->addrs[NDIRECT];
+        if (blk != 0)
+        {
+            indir = (uint *)(addr + blk * BLOCK_SIZE);
+            for (j = 0; j < NINDIRECT; j++)
+            {
+                blk = indir[j];
+                if (blk == 0)
+                    continue;
+
+                de = (struct dirent *)(addr + blk * BLOCK_SIZE);
+                for (k = 0; k < BLOCK_SIZE / sizeof(struct dirent); k++, de++)
+                {
+                    if (de->inum == 0)
+                        continue;
+
+                    ref_inum = de->inum;
+                    if (ref_inum >= sb->ninodes)
+                        continue;
+
+                    // Build parent map for directories based on directory entries (excluding "." and "..")
+                    if (strcmp(de->name, ".") != 0 && strcmp(de->name, "..") != 0 && itable[ref_inum].type == T_DIR)
+                    {
+                        if (parent[ref_inum] == -1)
+                            parent[ref_inum] = i;
+                        else if (parent[ref_inum] != (int)i)
+                        {
+                            fprintf(stderr, "ERROR: directory appears more than once in file system.\n");
+                            exit(1);
+                        }
+                    }
+
+                    // Mark that this inode is referenced by some directory
+                    inode_referenced[ref_inum] = 1;
+
+                    // Count references for link count checks (exclude "." entry)
+                    if (strcmp(de->name, ".") != 0)
+                        inode_refcount[ref_inum]++;
+
+                    // Count directory parents (exclude "." and "..")
+                    if (strcmp(de->name, ".") != 0 && strcmp(de->name, "..") != 0)
+                        dir_refcount[ref_inum]++;
+                }
+            }
+        }
+    }
+
+    // Validate .. entries using parent map
+    // Third pass: confirm each directory's ".." matches the discovered parent directory
+    for (i = 0; i < sb->ninodes; i++)
+    {
+        dip = &itable[i];
+        if (dip->type != T_DIR)
+            continue;
+
+        // If we never recorded ".." for this directory, formatting is wrong
+        if (dotdot_of[i] == -1)
+        {
+            fprintf(stderr, "ERROR: directory not properly formatted.\n");
+            exit(1);
+        }
+
+        // Root's parent must be itself
+        if (i == ROOTINO)
+        {
+            if (dotdot_of[i] != ROOTINO)
+            {
+                fprintf(stderr, "ERROR: directory not properly formatted.\n");
+                exit(1);
+            }
+        }
+        else
+        {
+            // Only validate directories that are referenced in the tree
+            if (inode_referenced[i] && parent[i] != dotdot_of[i])
+            {
+                fprintf(stderr, "ERROR: directory not properly formatted.\n");
+                exit(1);
+            }
+        }
+    }
+
+    // RULE 9: For all inodes marked in use, each must be referred to in at least one directory
+    for (i = 0; i < sb->ninodes; i++)
+    {
+        if (itable[i].type != 0 && inode_referenced[i] == 0)
+        {
+            fprintf(stderr, "ERROR: inode marked use but not found in a directory.\n");
+            exit(1);
+        }
+    }
+
+    // RULE 10: For each inode number that is referred to in a valid directory, it is actually marked in use
+    for (i = 0; i < sb->ninodes; i++)
+    {
+        if (inode_referenced[i] == 1 && itable[i].type == 0)
+        {
+            fprintf(stderr, "ERROR: inode referred to in directory but marked free.\n");
+            exit(1);
+        }
+    }
+
+    // RULE 11: Reference counts (number of links) for regular files match the number of times file is referred to in directories
+    for (i = 0; i < sb->ninodes; i++)
+    {
+        if (itable[i].type == T_FILE)
+        {
+            if (itable[i].nlink != inode_refcount[i])
+            {
+                fprintf(stderr, "ERROR: bad reference count for file.\n");
+                exit(1);
+            }
+        }
+    }
+
+    // RULE 12: No extra links allowed for directories (each directory only appears in one other directory)
+    for (i = 0; i < sb->ninodes; i++)
+    {
+        if (itable[i].type == T_DIR && i != ROOTINO)
+        {
+            if (dir_refcount[i] > 1)
+            {
+                fprintf(stderr, "ERROR: directory appears more than once in file system.\n");
+                exit(1);
+            }
+        }
+    }
+
     // --- CLEANUP ---
+    free(inode_referenced);
+    free(inode_refcount);
+    free(dir_refcount);
+    free(dotdot_of);
+    free(parent);
     munmap(addr, st.st_size);
     close(fsfd);
-    return 0; //success
+    return 0; // success
 }
